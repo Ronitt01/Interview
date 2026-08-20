@@ -2,11 +2,7 @@
 
 Generated from `artifacts/experiments.csv` — do not edit by hand.
 
-| id | model | window | n | threshold | acc | f1 | precision | recall | false_interrupt | missed | roc_auc | pr_auc | cpu_p50_ms | cpu_p95_ms | size_mb | params_m | notes |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| E0 | energy-gated trailing-silence timer | whole clip | 400 | 485.0 | 0.57 | 0.2833 | 0.6182 | 0.1838 | 0.0977 | 0.8162 | 0.6602 | 0.5813 | — | — | 0.0 | 0.0 | threshold in ms of trailing silence; scored on test |
-| E0b | Silero VAD trailing-silence timer | whole clip | 400 | 706.4062 | 0.5575 | 0.2468 | 0.58 | 0.1568 | 0.0977 | 0.8432 | 0.6433 | 0.5567 | — | — | 10.02 | 0.0 | threshold in ms of trailing silence; scored on test |
-| SMOKE-onnx-int8 | SMOKE int8 ONNX | 1s | 400 | 0.6807 | 0.5975 | 0.2648 | 0.8529 | 0.1568 | 0.0233 | 0.8432 | 0.7605 | 0.7266 | 18.1 | 21.1 | 8.02 | 7.65 | quantised deployment artefact |
-| SMOKE | whisper-tiny linear | 1s | 400 | 0.6807 | 0.605 | 0.3009 | 0.8293 | 0.1838 | 0.0326 | 0.8162 | 0.7656 | 0.7286 | — | — | 30.64 | 7.65 | pipeline verification run - not a reportable result |
-| SMOKE-dry | whisper-tiny linear | 1s | 400 | 0.6071 | 0.61 | 0.3659 | 0.7377 | 0.2432 | 0.0744 | 0.7568 | 0.7416 | 0.681 | — | — | 30.64 | 7.65 | pipeline verification run - not a reportable result |
-| SMOKE-eval | whisper-tiny linear | 1s | 400 | 0.6807 | 0.605 | 0.3009 | 0.8293 | 0.1838 | 0.0326 | 0.8162 | 0.7656 | 0.7286 | — | — | 30.64 | 7.65 | eval-only; held-out test at val-selected threshold 0.6807 |
+| id | model | window | n | threshold | acc | f1 | precision | recall | false_interrupt | missed | roc_auc | pr_auc | size_mb | params_m | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| REH_w0p5/val | whisper-tiny linear | 0.5s | 239 | 0.6289 | 0.4854 | 0.1022 | 0.5 | 0.0569 | 0.0603 | 0.9431 | 0.5032 | 0.5137 | 30.6 | 7.64 | window sweep: 0.5s (E1 config otherwise unchanged) |
+| REH_w1p0/val | whisper-tiny linear | 1s | 239 | 0.6484 | 0.5063 | 0.1061 | 0.7778 | 0.0569 | 0.0172 | 0.9431 | 0.5878 | 0.5751 | 30.64 | 7.65 | window sweep: 1.0s (E1 config otherwise unchanged) |

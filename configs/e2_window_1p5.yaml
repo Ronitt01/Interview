@@ -2,7 +2,12 @@
 run_id: E2_w1p5
 notes: "window sweep: 1.5s (E1 config otherwise unchanged)"
 cache_dir: data/cache/train
-test_cache_dir: data/cache/test
+# Deliberately null for the whole sweep. The winner is chosen on validation
+# only; scoring all five windows on the held-out set would spend its
+# independence five times over before a decision was made. The single test
+# evaluation happens afterwards, on the winner, via:
+#   python -m training.train --eval-only --checkpoint weights/<winner>-best.pt
+test_cache_dir: null
 window_seconds: 1.5
 head: linear
 pool: mean
