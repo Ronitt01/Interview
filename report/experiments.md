@@ -8,3 +8,5 @@ Generated from `artifacts/experiments.csv` — do not edit by hand.
 | E0b | Silero VAD trailing-silence timer | whole clip | 400 | 706.4062 | 0.5575 | 0.2468 | 0.58 | 0.1568 | 0.0977 | 0.8432 | 0.6433 | 0.5567 | — | — | 10.02 | 0.0 | threshold in ms of trailing silence; scored on test |
 | SMOKE-onnx-int8 | SMOKE int8 ONNX | 1s | 400 | 0.6807 | 0.5975 | 0.2648 | 0.8529 | 0.1568 | 0.0233 | 0.8432 | 0.7605 | 0.7266 | 18.1 | 21.1 | 8.02 | 7.65 | quantised deployment artefact |
 | SMOKE | whisper-tiny linear | 1s | 400 | 0.6807 | 0.605 | 0.3009 | 0.8293 | 0.1838 | 0.0326 | 0.8162 | 0.7656 | 0.7286 | — | — | 30.64 | 7.65 | pipeline verification run - not a reportable result |
+| SMOKE-dry | whisper-tiny linear | 1s | 400 | 0.6071 | 0.61 | 0.3659 | 0.7377 | 0.2432 | 0.0744 | 0.7568 | 0.7416 | 0.681 | — | — | 30.64 | 7.65 | pipeline verification run - not a reportable result |
+| SMOKE-eval | whisper-tiny linear | 1s | 400 | 0.6807 | 0.605 | 0.3009 | 0.8293 | 0.1838 | 0.0326 | 0.8162 | 0.7656 | 0.7286 | — | — | 30.64 | 7.65 | eval-only; held-out test at val-selected threshold 0.6807 |

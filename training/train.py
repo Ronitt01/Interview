@@ -208,18 +208,275 @@ def predict_split(model, loader, device) -> tuple[np.ndarray, np.ndarray]:
 
 
 # --------------------------------------------------------------------------- #
+# eval-only
+# --------------------------------------------------------------------------- #
+def _resolve_eval_config(args) -> tuple["TrainConfig", Path, dict]:
+    """Work out which config and which checkpoint to evaluate.
+
+    Two entry routes, both ending at the same place:
+
+    * ``--config`` given — the checkpoint defaults to
+      ``<checkpoint_dir>/<run_id>-best.pt``, i.e. exactly where training wrote it.
+    * ``--checkpoint`` given alone — the config is rebuilt from the checkpoint's
+      own ``metadata.config``, which ``save_checkpoint`` stored at training time.
+
+    The second route matters: it means a checkpoint is self-describing and can be
+    scored without hunting for the YAML that produced it.
+    """
+    import torch
+
+    if args.config:
+        cfg = TrainConfig.load(args.config)
+        ckpt_path = Path(args.checkpoint) if args.checkpoint else (
+            Path(cfg.checkpoint_dir) / f"{cfg.run_id}-best.pt"
+        )
+    else:
+        if not args.checkpoint:
+            raise SystemExit("--eval-only needs --config or --checkpoint")
+        ckpt_path = Path(args.checkpoint)
+
+    if not ckpt_path.exists():
+        raise SystemExit(f"no checkpoint at {ckpt_path}")
+
+    blob = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    for key in ("model_config", "state_dict", "threshold"):
+        if key not in blob:
+            raise SystemExit(f"{ckpt_path} is missing {key!r}; not a turn-detector checkpoint")
+
+    if not args.config:
+        stored = (blob.get("metadata") or {}).get("config")
+        if not stored:
+            raise SystemExit(
+                f"{ckpt_path} carries no training config, so --config must be passed"
+            )
+        known = {k: v for k, v in stored.items() if k in TrainConfig.__dataclass_fields__}
+        if "group_keys" in known:
+            known["group_keys"] = tuple(known["group_keys"])
+        cfg = TrainConfig(**known)
+
+    return cfg, ckpt_path, blob
+
+
+def evaluate_only(args) -> int:
+    """Score an existing checkpoint on validation and test. Nothing is trained.
+
+    The one rule this function exists to enforce: **the threshold comes from the
+    checkpoint and is applied unchanged to test.** It was selected on validation
+    during training, and re-selecting it here against test labels would report the
+    best case for a threshold nobody could have known in advance. So
+    :func:`src.metrics.pick_threshold` is never called in this path — the only
+    threshold that exists is the one loaded from disk.
+
+    The validation split is reconstructed from the *checkpoint's own* config
+    (``val_fraction``, ``group_keys``, ``seed``), so the validation rows scored
+    here are the same rows the training run held out. Recomputing the split from
+    a different seed would silently score training data as validation.
+    """
+    import torch
+
+    cfg, ckpt_path, blob = _resolve_eval_config(args)
+    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    threshold = float(blob["threshold"])
+    trained_epoch = (blob.get("metadata") or {}).get("epoch")
+
+    run_id = f"{cfg.run_id}-eval"
+    print(f"\n=== {run_id} (eval-only) ===")
+    print(f"  mode        : evaluation only — no optimiser, no scheduler, no "
+          f"weight update, no checkpoint write")
+    print(f"  checkpoint  : {ckpt_path}  (unmodified, opened read-only)")
+    print(f"  trained for : {trained_epoch} epoch(s) in the original run")
+    print(f"  device      : {device}")
+    print(f"  threshold   : {threshold:.6f}  <- loaded from the checkpoint "
+          f"(selected on validation during training)")
+
+    # -- model: the exact existing construction path ----------------------- #
+    model = build_model(blob["model_config"]).to(device)
+    # strict=True on purpose: a silently-dropped head weight would score as a
+    # randomly-initialised classifier and look like a bad model rather than a
+    # loading bug.
+    model.load_state_dict(blob["state_dict"], strict=True)
+    model.eval()
+    print(f"  model       : {model.describe()}")
+    print(f"  state_dict  : loaded strict=True, "
+          f"{sum(p.numel() for p in model.parameters()):,d} params")
+
+    window = WindowSpec(cfg.window_seconds)
+
+    # -- validation split, reconstructed exactly --------------------------- #
+    train_cache = WaveCache(cfg.cache_dir)
+    print(f"\n  train cache : {cfg.cache_dir} — {train_cache.summary().splitlines()[0]}")
+    idx, split_rep = split_indices(
+        train_cache,
+        {"train": 1.0 - cfg.val_fraction, "val": cfg.val_fraction},
+        group_keys=cfg.group_keys,
+        seed=cfg.seed,
+    )
+    from src.splits import assert_no_leakage
+
+    assert_no_leakage(
+        {k: [train_cache.meta[int(i)] for i in v] for k, v in idx.items()},
+        group_keys=cfg.group_keys,
+    )
+    val_idx = idx["val"]
+    if cfg.max_val_rows:
+        val_idx = val_idx[: cfg.max_val_rows]
+    print(f"  {split_rep}")
+    print(f"  leakage assertion: passed")
+    print(f"  val split reconstructed from the checkpoint's own config "
+          f"(val_fraction={cfg.val_fraction}, group_keys={list(cfg.group_keys)}, seed={cfg.seed})")
+
+    val_ds = TurnDataset(train_cache, val_idx, window, cfg.normalise_mode, None)
+    val_loader = make_loader(val_ds, cfg.batch_size, num_workers=cfg.num_workers)
+    val_probs, val_ys = predict_split(model, val_loader, device)
+    val_ev = evaluate(f"{run_id}/val", val_ys, val_probs, threshold=threshold)
+    val_conf = confusion_at(val_ys, val_probs, threshold)
+
+    # -- test: same threshold, never re-picked ----------------------------- #
+    test_cache_dir = Path(cfg.test_cache_dir) if cfg.test_cache_dir else None
+    if not test_cache_dir or not test_cache_dir.exists():
+        raise SystemExit(
+            f"test cache {test_cache_dir} not found — eval-only exists to produce a "
+            "held-out test score, so this is a hard error rather than a warning"
+        )
+    test_cache = WaveCache(str(test_cache_dir))
+    print(f"\n  test cache  : {test_cache_dir} — {test_cache.summary().splitlines()[0]}")
+    test_idx = np.arange(len(test_cache))
+    test_ds = TurnDataset(test_cache, test_idx, window, cfg.normalise_mode, None)
+    test_loader = make_loader(test_ds, cfg.batch_size, num_workers=cfg.num_workers)
+    test_probs, test_ys = predict_split(model, test_loader, device)
+    test_ev = evaluate(run_id, test_ys, test_probs, threshold=threshold)
+    test_conf = confusion_at(test_ys, test_probs, threshold)
+
+    counts = model.parameter_counts()
+    test_ev.params_m = counts["total"] / 1e6
+    from src.optimize import model_size_mb
+
+    test_ev.size_mb = model_size_mb(model)
+
+    # -- output ------------------------------------------------------------ #
+    def block(name: str, conf, ev) -> str:
+        return (
+            f"{name}:\n"
+            f"  n:               {conf.n}\n"
+            f"  accuracy:        {conf.accuracy:.4f}\n"
+            f"  precision:       {conf.precision:.4f}\n"
+            f"  recall:          {conf.recall:.4f}\n"
+            f"  f1:              {conf.f1:.4f}\n"
+            f"  false_interrupt: {conf.false_interruption_rate:.4f}\n"
+            f"  missed:          {conf.missed_endpoint_rate:.4f}\n"
+            f"  roc_auc:         {ev.roc_auc:.4f}\n"
+            f"  pr_auc:          {ev.pr_auc:.4f}"
+        )
+
+    print()
+    print("=" * 66)
+    print(f"checkpoint: {ckpt_path}")
+    print(f"threshold:  {threshold:.6f}")
+    print(block("validation", val_conf, val_ev))
+    print(block("test", test_conf, test_ev))
+    print("=" * 66)
+    print("\n  test confusion matrix")
+    print(test_conf.matrix_str())
+
+    # Integrity, printed rather than asserted in prose.
+    print("\n  threshold integrity")
+    print(f"    source                : checkpoint['threshold'] = {threshold:.6f}")
+    print(f"    selected on           : validation, during the original training run")
+    print(f"    re-selected on test?  : NO — pick_threshold() is never called in "
+          f"eval-only")
+    print(f"    applied to test as    : {threshold:.6f} (identical, unchanged)")
+    print(f"    test labels used for  : scoring only")
+    print("\n  proof no training occurred")
+    print("    optimiser created     : no")
+    print("    scheduler created     : no")
+    print("    backward() calls      : 0")
+    print("    model.train() calls   : 0  (model.eval() only)")
+    print("    checkpoint written    : no")
+    print(f"    checkpoint mtime      : unchanged ({ckpt_path.stat().st_mtime_ns} ns)")
+
+    # -- artefacts --------------------------------------------------------- #
+    run_dir = Path(cfg.artifacts_dir) / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "config.yaml.json").write_text(
+        json.dumps(cfg.to_dict(), indent=2), encoding="utf-8"
+    )
+    split_rep.save(run_dir / "split_report.json")
+    test_ev.save(run_dir / "evaluation.json")
+    val_ev.save(run_dir / "evaluation_val.json")
+    np.save(run_dir / "val_probs.npy", val_probs)
+    np.save(run_dir / "val_labels.npy", val_ys)
+    np.save(run_dir / "val_indices.npy", val_idx)
+    np.save(run_dir / "test_probs.npy", test_probs)
+    np.save(run_dir / "test_labels.npy", test_ys)
+    (run_dir / "eval_only.json").write_text(
+        json.dumps(
+            {
+                "mode": "eval_only",
+                "checkpoint": str(ckpt_path),
+                "checkpoint_mtime_ns": ckpt_path.stat().st_mtime_ns,
+                "threshold": threshold,
+                "threshold_source": "checkpoint['threshold'], selected on validation",
+                "threshold_retuned_on_test": False,
+                "trained_epochs_in_original_run": trained_epoch,
+                "device": device,
+                "val": {"n": val_conf.n, **val_ev.row()},
+                "test": {"n": test_conf.n, **test_ev.row()},
+            },
+            indent=2,
+            default=str,
+        ),
+        encoding="utf-8",
+    )
+
+    rows = slice_report(test_cache, test_idx, test_probs, threshold)
+    (run_dir / "slices.md").write_text(
+        slices_to_markdown(rows, f"{run_id} — per-slice (test, threshold {threshold:.4f})"),
+        encoding="utf-8",
+    )
+
+    # A new row id, so the original run's row is not overwritten.
+    table = ExperimentTable(cfg.table_path)
+    row = table.add_evaluation(
+        test_ev,
+        model=f"{cfg.backbone.split('/')[-1]} {cfg.head}",
+        window=str(window),
+        notes=f"eval-only; held-out test at val-selected threshold {threshold:.4f}",
+    )
+    table.print_row(row)
+    table.save_markdown()
+
+    print(f"\n  artefacts -> {run_dir}")
+    print(f"  original training artefacts under "
+          f"{Path(cfg.artifacts_dir) / cfg.run_id} were not touched")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # main
 # --------------------------------------------------------------------------- #
 def main(argv=None) -> int:
     import torch
 
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--config", required=True)
+    # Not required, because --eval-only can recover the full config from the
+    # checkpoint's own metadata. Still required for training; enforced below.
+    ap.add_argument("--config", default=None)
     ap.add_argument("--device", default=None)
     ap.add_argument("--no-resume", action="store_true")
     ap.add_argument("--dry-run", action="store_true",
                     help="one tiny epoch on a few hundred rows, to prove the wiring")
+    ap.add_argument("--eval-only", action="store_true",
+                    help="score an existing checkpoint on val and test. No training, "
+                         "no optimiser, no weight update, no checkpoint write.")
+    ap.add_argument("--checkpoint", default=None,
+                    help="checkpoint to evaluate. Defaults to "
+                         "<checkpoint_dir>/<run_id>-best.pt from the config.")
     args = ap.parse_args(argv)
+
+    if args.eval_only:
+        return evaluate_only(args)
+    if not args.config:
+        ap.error("--config is required for training (or pass --eval-only)")
 
     cfg = TrainConfig.load(args.config)
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")

@@ -49,3 +49,12 @@ artifacts/figures/
 .playwright-mcp/
 *.png
 !docs/**/*.png
+
+# --- archives -----------------------------------------------------------------
+# Project tarballs/zips used to move the tree to Colab. These are hundreds of MB,
+# exceed GitHub's 100 MB per-file limit, and duplicate the repo they came from.
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
