@@ -367,6 +367,181 @@ class WaveCache:
 # --------------------------------------------------------------------------- #
 # torch Dataset
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# random-offset cropping
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class RandomOffsetConfig:
+    """Move a training window's right edge off the annotated boundary.
+
+    **The problem this exists to fix.** Every cached clip ends at a moment an
+    annotator chose: a positive clip ends at a real turn end, a negative clip
+    ends at a real mid-utterance point. So in training the window's right edge is
+    always a curated instant. In streaming it is wherever the hop happens to
+    land, which is almost never either of those. That mismatch was measured and
+    it is large: the same model at the same threshold went from a 0.033
+    false-interruption rate on clips to 0.460 streamed.
+
+    **The fix, and why it is not the forbidden crop.** :mod:`src.augment` bans
+    cropping from the end, because removing the tail of a positive clip destroys
+    the endpoint evidence while the label still says "ended" -- the label stops
+    describing the audio. This crops from the end *and re-derives the label from
+    where the crop actually lands*, which is the opposite operation: it
+    manufactures correctly-labelled negatives at exactly the window alignments
+    streaming produces and training never had.
+
+    Attributes
+    ----------
+    enabled:
+        Off by default. E1 and the E2 sweep must stay reproducible unchanged.
+    prob:
+        Fraction of training examples given a shifted right edge. The rest keep
+        their original alignment, so the model still sees curated boundaries.
+    max_shift_ms:
+        Upper bound on how far back the right edge moves, sampled uniformly from
+        [0, max_shift_ms].
+    tolerance_ms:
+        A shift this small leaves the edge effectively still at the boundary, so
+        the original label is kept. Related to
+        :data:`src.streaming.EARLY_FIRE_TOLERANCE_MS` but deliberately tighter:
+        that one bounds how early a *fire* may be and still be forgiven, this one
+        bounds how early a *training window* may end and still be an endpoint.
+    min_keep_ms:
+        Never crop a clip shorter than this. A 40 ms fragment carries no prosody
+        and would just be noise with a confident label.
+
+    Any shift beyond ``tolerance_ms`` produces a **negative**, whatever the
+    clip's own label was -- that is the entire teaching signal. It also lowers
+    the realised positive rate, which :mod:`training.train` prints so the change
+    is visible rather than silent; ``use_pos_weight`` then compensates in the
+    loss.
+    """
+
+    enabled: bool = False
+    prob: float = 0.5
+    max_shift_ms: float = 4000.0
+    tolerance_ms: float = 150.0
+    min_keep_ms: float = 500.0
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.prob <= 1.0:
+            raise ValueError(f"prob must be in [0, 1], got {self.prob}")
+        if self.max_shift_ms < 0 or self.tolerance_ms < 0 or self.min_keep_ms <= 0:
+            raise ValueError("random-offset durations must be non-negative")
+        if self.enabled and self.tolerance_ms >= self.max_shift_ms:
+            # Every shift would land inside the tolerance, so every example would
+            # keep its label and the mechanism would be a silent no-op that looks
+            # like it is working.
+            raise ValueError(
+                f"tolerance_ms ({self.tolerance_ms}) >= max_shift_ms "
+                f"({self.max_shift_ms}): no example would ever be relabelled"
+            )
+
+
+def apply_random_offset(
+    wave: np.ndarray,
+    label: int,
+    cfg: RandomOffsetConfig,
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, int, float]:
+    """Crop to an earlier right edge. Returns ``(wave, label, shift_ms)``.
+
+    Pure, with the generator injected, so it is testable without a cache.
+    ``shift_ms == 0.0`` means the example was left alone.
+    """
+    if not cfg.enabled or rng.random() >= cfg.prob:
+        return wave, int(label), 0.0
+
+    n = int(wave.size)
+    min_keep = int(round(cfg.min_keep_ms * SAMPLE_RATE / 1000.0))
+    if n <= min_keep:
+        return wave, int(label), 0.0
+
+    max_shift = min(int(round(cfg.max_shift_ms * SAMPLE_RATE / 1000.0)), n - min_keep)
+    if max_shift <= 0:
+        return wave, int(label), 0.0
+
+    shift = int(rng.integers(0, max_shift + 1))
+    if shift == 0:
+        return wave, int(label), 0.0
+
+    shift_ms = shift * 1000.0 / SAMPLE_RATE
+    # Beyond the tolerance the crop no longer ends at the boundary, so whatever
+    # the clip was annotated as, this particular window is mid-utterance.
+    new_label = int(label) if shift_ms <= cfg.tolerance_ms else 0
+    return wave[: n - shift], new_label, shift_ms
+
+
+# --------------------------------------------------------------------------- #
+# hard-negative index files
+# --------------------------------------------------------------------------- #
+HARD_NEGATIVE_META = "hard_negative_meta.json"
+
+
+def load_hard_negatives(
+    path: str | Path,
+    cache_dir: str | Path,
+    n_clips: int,
+    allowed: Sequence[int] | np.ndarray | None = None,
+) -> np.ndarray:
+    """Load mined hard-negative indices, refusing to load the wrong ones.
+
+    **Why this is defensive rather than a one-line np.load.** Indices are
+    positions into one specific cache. ``scripts/error_analysis.py`` defaults to
+    mining on ``data/cache/test``, so a file mined with the defaults indexes the
+    *held-out test set* -- and oversampling those into training would be training
+    on test, silently invalidating every number in the project. The failure mode
+    is invisible: the indices are just integers and they load fine.
+
+    So a sidecar written at mining time records which cache the indices came
+    from, and this refuses to proceed unless it matches. ``allowed`` further
+    restricts to a split, so mined indices cannot pull validation rows into
+    training either.
+    """
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"no hard-negative index file at {p}")
+
+    idx = np.asarray(np.load(p), dtype=np.int64).ravel()
+
+    meta_path = p.parent / HARD_NEGATIVE_META
+    if not meta_path.exists():
+        raise FileNotFoundError(
+            f"{p} has no {HARD_NEGATIVE_META} beside it, so which cache these "
+            "indices belong to is unknown. Re-mine with a current "
+            "scripts/error_analysis.py, which writes the sidecar. Refusing to "
+            "guess: if these were mined on the test cache, using them would be "
+            "training on held-out data."
+        )
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+
+    mined_on = str(meta.get("cache_dir", ""))
+    want = str(cache_dir)
+    if Path(mined_on).name != Path(want).name:
+        raise ValueError(
+            f"hard negatives were mined on {mined_on!r} but training reads "
+            f"{want!r}. Indices are cache-relative and are not transferable "
+            "between caches."
+        )
+    if int(meta.get("n_clips", -1)) != int(n_clips):
+        raise ValueError(
+            f"hard negatives were mined on a cache of {meta.get('n_clips')} "
+            f"clips; this cache has {n_clips}. The cache has been rebuilt, so "
+            "the indices no longer point at the clips they were chosen for."
+        )
+
+    if idx.size and (idx.min() < 0 or idx.max() >= n_clips):
+        raise ValueError(
+            f"hard-negative indices out of range for a {n_clips}-clip cache "
+            f"(min {idx.min()}, max {idx.max()})"
+        )
+
+    if allowed is not None:
+        idx = idx[np.isin(idx, np.asarray(allowed, dtype=np.int64))]
+
+    return idx
+
+
 class TurnDataset:
     """Log-mel + label, for one split.
 
@@ -386,12 +561,14 @@ class TurnDataset:
         n_mels: int = 80,
         epoch: int = 0,
         return_meta: bool = False,
+        offset_cfg: RandomOffsetConfig | None = None,
     ) -> None:
         self.cache = cache
         self.indices = np.asarray(indices, dtype=np.int64)
         self.window = window
         self.normalise_mode = normalise_mode
         self.augment_cfg = augment_cfg or AugmentConfig()
+        self.offset_cfg = offset_cfg or RandomOffsetConfig()
         self.front_end = MelFrontEnd(window, n_mels=n_mels)
         self.epoch = epoch
         self.return_meta = return_meta
@@ -406,25 +583,60 @@ class TurnDataset:
     def __getitem__(self, i: int):
         row = int(self.indices[i])
         wave = self.cache.wave(row)
+        label = self.cache.label(row)
 
         # Augment on the natural-length waveform, before windowing: a masked span
         # or a speed change applied after padding would land partly on zeros.
         if self.augment_cfg.enabled:
             wave = augment(wave, self.augment_cfg, seed=row * 8191 + self.epoch)
 
+        # Random offset comes after augmentation and before normalise/window,
+        # for the same reason: it has to act on real audio, not on padding. The
+        # seed multiplier differs from the augmentation one so the two streams
+        # are not correlated across rows.
+        if self.offset_cfg.enabled:
+            rng = np.random.default_rng(row * 7919 + self.epoch * 104729)
+            wave, label, _shift_ms = apply_random_offset(
+                wave, label, self.offset_cfg, rng
+            )
+
         wave = normalise(wave, self.normalise_mode)
         from .audio import fit_window
 
         wave = fit_window(wave, self.window)
         mel = self.front_end(wave)[0]  # (n_mels, n_frames)
-        label = self.cache.label(row)
 
         if self.return_meta:
             return mel, label, self.cache.meta[row]
         return mel, label
 
-    def labels(self) -> np.ndarray:
-        return np.asarray([self.cache.label(int(i)) for i in self.indices], dtype=np.int64)
+    def labels(self, effective: bool = False) -> np.ndarray:
+        """Labels for this split.
+
+        ``effective=True`` replays the random-offset relabelling for the current
+        epoch, without decoding any audio, and is what class balance must be
+        computed from once offsets are on. Reading the raw cache labels there
+        would report a balanced ~0.50 positive rate while the model was actually
+        being shown ~0.26 -- and ``pos_weight`` would be wrong in the direction
+        that matters. Returns raw cache labels when offsets are disabled, so
+        every existing caller is unaffected.
+        """
+        raw = np.asarray(
+            [self.cache.label(int(i)) for i in self.indices], dtype=np.int64
+        )
+        if not effective or not self.offset_cfg.enabled:
+            return raw
+
+        out = raw.copy()
+        for k, row in enumerate(self.indices):
+            row = int(row)
+            rng = np.random.default_rng(row * 7919 + self.epoch * 104729)
+            n = int(self.cache.lengths[row])
+            _w, lab, _s = apply_random_offset(
+                np.empty(n, dtype=np.float32), int(raw[k]), self.offset_cfg, rng
+            )
+            out[k] = lab
+        return out
 
     def class_weights(self) -> tuple[float, float]:
         """``(weight_neg, weight_pos)`` inversely proportional to frequency.
@@ -433,7 +645,7 @@ class TurnDataset:
         loss and balancing the sampler — they are not equivalent, and which one
         is right depends on how severe the imbalance turns out to be.
         """
-        y = self.labels()
+        y = self.labels(effective=True)
         n = y.size
         pos = int(y.sum())
         neg = n - pos
@@ -443,7 +655,7 @@ class TurnDataset:
 
     def pos_weight(self) -> float:
         """``neg/pos``, the value ``BCEWithLogitsLoss(pos_weight=...)`` wants."""
-        y = self.labels()
+        y = self.labels(effective=True)
         pos = int(y.sum())
         return float((y.size - pos) / pos) if pos else 1.0
 

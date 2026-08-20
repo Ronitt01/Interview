@@ -1,0 +1,60 @@
+# E9 — random-offset crops. The fix for the finding in §11.2 of the report:
+# clip-level scores do not transfer to streaming, because every training window's
+# right edge lands on an annotated boundary while every streaming window's lands
+# wherever the hop falls.
+#
+# The mechanism: with probability `prob`, crop the clip to an earlier right edge
+# and RE-DERIVE the label from where the crop lands. A crop beyond `tolerance_ms`
+# is a mid-utterance moment and is labelled negative whatever the clip was
+# annotated as. That is what teaches the model that an internal pause is not an
+# endpoint — the exact confusion the streaming measurement exposed.
+#
+# This is NOT the end-cropping that src/augment.py forbids. That one crops and
+# keeps the stale label; this one crops and recomputes it.
+#
+# `window_seconds` here is E1's 8.0 s so the file is runnable standalone.
+# scripts/run_autonomous.py overrides it with the E2 winner's window and writes
+# the derived config to configs/generated/ before running, so the comparison is
+# against the winner rather than against an arbitrary window.
+run_id: E9
+notes: "random-offset crops with label re-derivation — targets the streaming gap"
+
+cache_dir: data/cache/train
+# Validation-only, like every candidate. The held-out set is scored once, at the
+# end, on the single final model.
+test_cache_dir: null
+
+window_seconds: 8.0
+head: linear
+pool: mean
+freeze_encoder: true
+unfreeze_top_blocks: 0
+
+val_fraction: 0.2
+group_keys: [dataset]
+normalise_mode: peak
+use_pos_weight: true
+
+random_offset:
+  enabled: true
+  # Half the batch keeps its curated alignment, so the model still sees real
+  # boundaries and does not simply learn "cropped means negative".
+  prob: 0.5
+  # 4 s of shift covers the range a 160 ms hop wanders over during a long
+  # utterance. Bounded rather than unbounded so min_keep_ms rarely binds.
+  max_shift_ms: 4000.0
+  # Inside 150 ms the edge is still effectively the boundary, so the label
+  # stands. Tighter than streaming's 1000 ms early-fire tolerance on purpose:
+  # that one forgives an early *fire*, this one defines a positive *window*.
+  tolerance_ms: 150.0
+  min_keep_ms: 500.0
+
+epochs: 8
+batch_size: 32
+lr: 1.0e-3
+weight_decay: 0.01
+seed: 1234
+amp: true
+
+fp_cost: 4.0
+early_stop_patience: 3

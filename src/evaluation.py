@@ -121,12 +121,31 @@ class ExperimentTable:
         ]
         return "\n".join([head, rule, *body])
 
-    def save_markdown(self, path: str | Path = "report/experiments.md") -> Path:
-        p = Path(path)
+    def default_markdown_path(self) -> Path:
+        """Where the markdown goes when the caller does not say.
+
+        Derived from the CSV this table was opened on, not hardcoded. Every call
+        site passes no argument, so a hardcoded default meant a run pointed at a
+        scratch ``table_path`` would still overwrite ``report/experiments.md``
+        with its throwaway rows -- a silent corruption of the real table by a
+        sandboxed run. Deriving it keeps a sandboxed table's output sandboxed.
+        """
+        canonical = Path("artifacts/experiments.csv")
+        try:
+            is_canonical = self.path.resolve() == (
+                Path(__file__).resolve().parents[1] / canonical).resolve()
+        except OSError:
+            is_canonical = False
+        if is_canonical:
+            return Path(__file__).resolve().parents[1] / "report" / "experiments.md"
+        return self.path.with_suffix(".md")
+
+    def save_markdown(self, path: str | Path | None = None) -> Path:
+        p = Path(path) if path is not None else self.default_markdown_path()
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(
             "# Experiment matrix\n\n"
-            "Generated from `artifacts/experiments.csv` — do not edit by hand.\n\n"
+            f"Generated from `{self.path.as_posix()}` — do not edit by hand.\n\n"
             + self.to_markdown()
             + "\n",
             encoding="utf-8",

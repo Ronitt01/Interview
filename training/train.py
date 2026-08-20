@@ -35,7 +35,14 @@ if str(REPO_ROOT) not in sys.path:
 
 from src.audio import WindowSpec  # noqa: E402
 from src.augment import AugmentConfig  # noqa: E402
-from src.dataset import TurnDataset, WaveCache, make_loader, split_indices  # noqa: E402
+from src.dataset import (  # noqa: E402
+    RandomOffsetConfig,
+    TurnDataset,
+    WaveCache,
+    load_hard_negatives,
+    make_loader,
+    split_indices,
+)
 from src.evaluation import ExperimentTable, slice_report, slices_to_markdown  # noqa: E402
 from src.inference import save_checkpoint  # noqa: E402
 from src.metrics import DEFAULT_FP_COST, confusion_at, evaluate, pick_threshold  # noqa: E402
@@ -69,6 +76,18 @@ class TrainConfig:
     balanced_sampler: bool = False
     use_pos_weight: bool = True
     augment: dict = field(default_factory=dict)
+
+    # Random-offset crops. Off by default: E1 and the E2 sweep must stay
+    # reproducible. See src.dataset.RandomOffsetConfig for what the keys mean and
+    # why the label is re-derived rather than carried over.
+    random_offset: dict = field(default_factory=dict)
+
+    # Hard-negative oversampling. hard_negative_file must have been mined on
+    # *this* cache -- src.dataset.load_hard_negatives refuses otherwise, because
+    # error_analysis.py defaults to the test cache and using those indices here
+    # would be training on held-out data.
+    hard_negative_file: str | None = None
+    hard_negative_repeat: int = 3
 
     # optimisation
     epochs: int = 6
@@ -123,6 +142,13 @@ class TrainConfig:
 
     def augment_config(self) -> AugmentConfig:
         return AugmentConfig(**self.augment) if self.augment else AugmentConfig()
+
+    def random_offset_config(self) -> RandomOffsetConfig:
+        return (
+            RandomOffsetConfig(**self.random_offset)
+            if self.random_offset
+            else RandomOffsetConfig()
+        )
 
     def to_dict(self) -> dict:
         d = {k: getattr(self, k) for k in self.__dataclass_fields__}
@@ -518,10 +544,46 @@ def main(argv=None) -> int:
     if cfg.max_val_rows:
         val_idx = val_idx[: cfg.max_val_rows]
 
+    # Hard negatives are appended to the *train* indices only, and only after
+    # load_hard_negatives has confirmed they were mined on this cache. Passing
+    # train_idx as `allowed` is the second guard: even a correctly-mined file
+    # must not be able to pull a validation row across the split boundary.
+    if cfg.hard_negative_file:
+        hard = load_hard_negatives(
+            cfg.hard_negative_file, cfg.cache_dir, len(cache), allowed=train_idx
+        )
+        if hard.size == 0:
+            print(f"  hard negatives: 0 usable from {cfg.hard_negative_file} "
+                  f"(none fell in the train split) - training unchanged")
+        else:
+            before = train_idx.size
+            train_idx = np.concatenate(
+                [train_idx] + [hard] * max(1, int(cfg.hard_negative_repeat))
+            )
+            print(f"  hard negatives: {hard.size} indices x "
+                  f"{cfg.hard_negative_repeat} -> train rows {before} -> "
+                  f"{train_idx.size}")
+
     window = WindowSpec(cfg.window_seconds)
     aug = cfg.augment_config()
-    train_ds = TurnDataset(cache, train_idx, window, cfg.normalise_mode, aug)
+    offset = cfg.random_offset_config()
+    train_ds = TurnDataset(
+        cache, train_idx, window, cfg.normalise_mode, aug, offset_cfg=offset
+    )
+    # Validation never gets random offsets. The point of a held-out split is to
+    # measure the same quantity across runs; changing what the split *means*
+    # between an offset run and a non-offset run would make the comparison
+    # meaningless. Streaming evaluation is where offset robustness gets measured.
     val_ds = TurnDataset(cache, val_idx, window, cfg.normalise_mode, None)
+
+    if offset.enabled:
+        raw = train_ds.labels().mean()
+        eff = train_ds.labels(effective=True).mean()
+        print(f"  random offset: prob={offset.prob} "
+              f"max_shift={offset.max_shift_ms:.0f}ms "
+              f"tol={offset.tolerance_ms:.0f}ms")
+        print(f"    train positive rate {raw:.4f} -> {eff:.4f} "
+              f"(relabelled by the crop)")
 
     train_loader = make_loader(
         train_ds, cfg.batch_size, shuffle=not cfg.balanced_sampler,

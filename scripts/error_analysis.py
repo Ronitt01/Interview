@@ -74,6 +74,14 @@ def main(argv=None) -> int:
                     help="share of the sample that should be false interruptions")
     ap.add_argument("--mine-hard-negatives", action="store_true")
     ap.add_argument("--hard-negative-count", type=int, default=500)
+    ap.add_argument(
+        "--mine-split", choices=("all", "train", "val"), default="all",
+        help="restrict mining to one split of --cache, reconstructed from the "
+             "checkpoint's own stored config. Use 'train' when the indices are "
+             "going to be oversampled in a later run: mining on 'all' of a "
+             "train cache would mix validation rows into training, and mining "
+             "on a test cache at all makes the indices unusable for training.",
+    )
     ap.add_argument("--out", default="artifacts/runs/error_analysis")
     args = ap.parse_args(argv)
 
@@ -92,6 +100,34 @@ def main(argv=None) -> int:
     idx = np.arange(len(cache))
     print(f"\n  predictor: {pred.info()}")
     print(f"  cache: {args.cache} ({idx.size:,d} clips)")
+
+    if args.mine_split != "all":
+        # Rebuild the split the checkpoint was trained under, so "train" here
+        # means the same rows it meant during training. The config travels inside
+        # the checkpoint, which is why this does not need the YAML.
+        from src.dataset import split_indices
+        from src.inference import load_checkpoint
+
+        if not args.checkpoint:
+            ap.error("--mine-split needs --checkpoint (the split lives in it)")
+        blob = load_checkpoint(args.checkpoint)
+        tcfg = dict(blob.get("metadata", {}).get("config") or {})
+        if not tcfg:
+            ap.error(
+                f"{args.checkpoint} carries no metadata.config, so the split it "
+                f"trained under cannot be reconstructed. Re-run with "
+                f"--mine-split all and mine on a cache you know the split of."
+            )
+        val_fraction = float(tcfg.get("val_fraction", 0.2))
+        parts, rep = split_indices(
+            cache,
+            {"train": 1.0 - val_fraction, "val": val_fraction},
+            group_keys=tuple(tcfg.get("group_keys", ("dataset",))),
+            seed=int(tcfg.get("seed", 1234)),
+        )
+        idx = np.asarray(parts[args.mine_split], dtype=np.int64)
+        print(f"  restricted to the {args.mine_split} split: {idx.size:,d} clips")
+        print(f"  {rep}")
 
     ev, probs = evaluate_predictor(pred, cache, idx, label, threshold=pred.threshold)
     thr = ev.threshold
@@ -188,6 +224,38 @@ def main(argv=None) -> int:
         hard = hard[np.argsort(-margin[hard])][: args.hard_negative_count]
         hard_idx = idx[hard]
         np.save(out / "hard_negative_indices.npy", hard_idx)
+
+        # Provenance sidecar. Indices are positions into one specific cache, and
+        # the default cache here is the held-out test set -- so a bare .npy is a
+        # loaded gun. src.dataset.load_hard_negatives refuses to read an index
+        # file without this, and refuses to read one whose cache does not match
+        # the cache training is about to read.
+        from src.dataset import HARD_NEGATIVE_META
+
+        (out / HARD_NEGATIVE_META).write_text(
+            json.dumps(
+                {
+                    "cache_dir": str(args.cache),
+                    "n_clips": int(len(cache)),
+                    "mine_split": args.mine_split,
+                    "checkpoint": str(args.checkpoint or args.onnx or ""),
+                    "threshold": float(thr),
+                    "count": int(hard_idx.size),
+                    "usable_for_training": args.mine_split == "train",
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        if args.mine_split != "train":
+            print(
+                f"\n  NOTE: mined with --mine-split {args.mine_split}. These "
+                f"indices are for inspection only.\n"
+                f"  Oversampling them in training requires --mine-split train "
+                f"on the train cache;\n"
+                f"  load_hard_negatives will refuse these."
+            )
+
         counts = Counter(cache.meta[int(i)].get("dataset") for i in hard_idx)
         print(f"\n  mined {hard_idx.size} hard negatives -> "
               f"{out / 'hard_negative_indices.npy'}")

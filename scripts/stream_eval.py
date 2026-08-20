@@ -73,10 +73,40 @@ def main(argv=None) -> int:
                          "same machinery — the like-for-like streaming comparison")
     ap.add_argument("--sweep", action="store_true")
     ap.add_argument("--out", default="artifacts/runs/streaming")
+    ap.add_argument(
+        "--split", choices=("all", "train", "val"), default="all",
+        help="restrict to one split of --cache, reconstructed from the "
+             "checkpoint's own stored config. Use 'val' when the streaming "
+             "result is going to inform a decision: deciding anything from a "
+             "test-set measurement is selection on test, whatever it is called.",
+    )
     args = ap.parse_args(argv)
 
     cache = WaveCache(args.cache)
     idx = np.arange(len(cache))
+    if args.split != "all":
+        from src.dataset import split_indices
+        from src.inference import load_checkpoint
+
+        if not args.checkpoint:
+            ap.error("--split needs --checkpoint (the split lives inside it)")
+        blob = load_checkpoint(args.checkpoint)
+        tcfg = dict(blob.get("metadata", {}).get("config") or {})
+        if not tcfg:
+            ap.error(
+                f"{args.checkpoint} carries no metadata.config, so its split "
+                f"cannot be reconstructed; re-run without --split."
+            )
+        val_fraction = float(tcfg.get("val_fraction", 0.2))
+        parts, rep = split_indices(
+            cache,
+            {"train": 1.0 - val_fraction, "val": val_fraction},
+            group_keys=tuple(tcfg.get("group_keys", ("dataset",))),
+            seed=int(tcfg.get("seed", 1234)),
+        )
+        idx = np.asarray(parts[args.split], dtype=np.int64)
+        print(f"  restricted to the {args.split} split: {idx.size:,d} clips")
+
     if args.max_rows:
         idx = idx[: args.max_rows]
 
@@ -133,7 +163,18 @@ def main(argv=None) -> int:
         for k, v in s["wall_latency_ms"].items():
             print(f"    {k:>4s}  {v:.2f}")
         (out / "single.json").write_text(
-            json.dumps({"config": cfg.to_dict(), "summary": s}, indent=2), encoding="utf-8"
+            json.dumps(
+                {
+                    "config": cfg.to_dict(),
+                    "summary": s,
+                    "cache": str(args.cache),
+                    "split": args.split,
+                    "n_clips": int(idx.size),
+                    "checkpoint": str(args.onnx or args.checkpoint or "baseline"),
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
         )
         return 0
 
