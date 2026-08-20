@@ -1,0 +1,18 @@
+# Normalise line endings in the repo, check out native on each platform. Without
+# this, a Windows clone rewrites every file and the first diff is 7,000 lines of
+# CRLF churn.
+* text=auto
+
+# Binary — never touch, never diff.
+*.onnx    binary
+*.pt      binary
+*.wav     binary
+*.npy     binary
+*.i16     binary
+
+# Notebooks: mark as text but suppress diffs. An executed notebook carries
+# base64 image payloads, so a real diff is unreadable and pollutes review.
+*.ipynb   text -diff
+
+# Keep shell scripts LF even on Windows, or bash refuses to run them.
+*.sh      text eol=lf

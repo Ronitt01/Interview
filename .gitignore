@@ -1,0 +1,51 @@
+# secrets
+.env
+
+# python
+**/__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# data — regenerate with scripts/prepare_data.py; never commit the corpus
+data/cache/
+data/hinglish/clips/*.wav
+
+# --- model weights ------------------------------------------------------------
+# Policy, so that a fresh clone can actually run the demo:
+#
+#   COMMITTED     weights/*-int8.onnx + its .json sidecar   (~8 MB — the actual
+#                 deployment artefact, and what demo/app.py and app.py look for
+#                 first, so a fresh clone can run the demo immediately)
+#   NOT COMMITTED weights/*.pt          (~31 MB torch checkpoints — needed only
+#                 to retrain or re-export; regenerate with training/train.py)
+#   NOT COMMITTED unquantised weights/*.onnx  (~31 MB — derivable from the .pt
+#                 via scripts/optimize_model.py, so committing it would put the
+#                 same weights in history twice)
+#
+# Training state is per-run scratch and never belongs in history.
+weights/*.pt
+weights/*-trainstate.json
+weights/*.onnx
+!weights/*-int8.onnx
+# and their metadata sidecars, so no orphan .json points at an absent graph
+weights/*.json
+!weights/*-int8.json
+
+# ONNX external-data sidecars. export_onnx consolidates weights into the .onnx
+# itself, so a stray .data file here means a stale export.
+weights/*.onnx.data
+
+# --- run outputs --------------------------------------------------------------
+# artifacts/experiments.csv IS tracked — it is the experiment table the report
+# is generated from. Everything else under runs/ is per-run scratch.
+artifacts/runs/
+artifacts/figures/
+!artifacts/experiments.csv
+
+# editor / tooling
+.claude/
+.playwright-mcp/
+*.png
+!docs/**/*.png

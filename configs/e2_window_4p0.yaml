@@ -1,0 +1,18 @@
+# E2 — window-size arm. The core latency/accuracy dial, one variable changed.
+run_id: E2_w4p0
+notes: "window sweep: 4.0s (E1 config otherwise unchanged)"
+cache_dir: data/cache/train
+test_cache_dir: data/cache/test
+window_seconds: 4.0
+head: linear
+pool: mean
+freeze_encoder: true
+val_fraction: 0.2
+group_keys: [dataset]
+normalise_mode: peak
+use_pos_weight: true
+epochs: 8
+batch_size: 32
+lr: 1.0e-3
+seed: 1234
+fp_cost: 4.0

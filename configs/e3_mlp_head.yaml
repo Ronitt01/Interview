@@ -1,0 +1,22 @@
+# E3 — head-capacity arm. Same frozen features, more capacity on top.
+# If E3 >> E1 the linear head was the bottleneck; if it ties, the frozen
+# features are, and E7 (unfreezing) is the experiment that matters.
+run_id: E3
+notes: "MLP head — isolates head capacity"
+cache_dir: data/cache/train
+test_cache_dir: data/cache/test
+window_seconds: 1.5
+head: mlp
+pool: mean
+hidden_size: 256
+dropout: 0.1
+freeze_encoder: true
+val_fraction: 0.2
+group_keys: [dataset]
+normalise_mode: peak
+use_pos_weight: true
+epochs: 8
+batch_size: 32
+lr: 1.0e-3
+seed: 1234
+fp_cost: 4.0

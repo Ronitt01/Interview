@@ -1,0 +1,20 @@
+# E4 — sequence arm. Tests whether endpointing needs the *trajectory* (falling
+# pitch, decaying energy, a filler that trails) rather than a pooled average.
+run_id: E4
+notes: "bidirectional GRU head — keeps frame ordering"
+cache_dir: data/cache/train
+test_cache_dir: data/cache/test
+window_seconds: 1.5
+head: gru
+hidden_size: 128
+dropout: 0.1
+freeze_encoder: true
+val_fraction: 0.2
+group_keys: [dataset]
+normalise_mode: peak
+use_pos_weight: true
+epochs: 8
+batch_size: 32
+lr: 1.0e-3
+seed: 1234
+fp_cost: 4.0

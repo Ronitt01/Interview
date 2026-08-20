@@ -1,0 +1,22 @@
+# A genuinely-trained but deliberately small run, used to verify the whole
+# Day 4 -> Day 12 chain on real audio without waiting for a full sweep.
+# Not a reportable result: 1.0s window, 3 epochs, 600 train rows.
+run_id: SMOKE
+notes: "pipeline verification run - not a reportable result"
+cache_dir: data/cache/train
+test_cache_dir: data/cache/test
+window_seconds: 1.0
+head: linear
+pool: mean
+freeze_encoder: true
+val_fraction: 0.2
+group_keys: [dataset]
+normalise_mode: peak
+use_pos_weight: true
+epochs: 3
+batch_size: 32
+lr: 2.0e-3
+seed: 1234
+max_train_rows: 600
+fp_cost: 4.0
+early_stop_patience: 3

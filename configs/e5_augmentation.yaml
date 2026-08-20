@@ -1,0 +1,26 @@
+# E5 — augmentation arm. Note speed_prob stays 0: changing speed changes pause
+# duration, and a 300 ms mid-sentence pause stretched 1.3x lands in turn-final
+# territory, so the label stops describing the audio. See src/augment.py.
+run_id: E5
+notes: "+ augmentation (gain, noise, reverb, head-masking; no speed)"
+cache_dir: data/cache/train
+test_cache_dir: data/cache/test
+window_seconds: 1.5
+head: linear
+freeze_encoder: true
+val_fraction: 0.2
+group_keys: [dataset]
+normalise_mode: peak
+use_pos_weight: true
+augment:
+  enabled: true
+  gain_prob: 0.5
+  noise_prob: 0.5
+  reverb_prob: 0.2
+  mask_prob: 0.2
+  speed_prob: 0.0
+epochs: 10
+batch_size: 32
+lr: 1.0e-3
+seed: 1234
+fp_cost: 4.0

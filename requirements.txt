@@ -1,0 +1,62 @@
+# Smart Turn Detection — runtime + training dependencies.
+#
+# torch/torchaudio are intentionally NOT pinned to a CUDA build here: this file is
+# installed both on a free-tier Colab T4 (GPU wheels already present in the image)
+# and on a local CPU box for the latency work in §11. To force the small CPU-only
+# wheels locally, install torch first from the CPU index:
+#
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements.txt
+#
+# scripts/setup.sh does exactly that. Exact resolved versions are frozen to
+# requirements.lock.txt after install — that lock file is what the HF Space uses.
+
+# --- core model / training -------------------------------------------------
+torch>=2.6
+torchaudio>=2.6
+transformers>=4.44
+huggingface_hub>=0.25
+safetensors>=0.4
+
+# --- data -----------------------------------------------------------------
+datasets>=3.0
+numpy>=1.26
+pandas>=2.2
+scipy>=1.14
+scikit-learn>=1.5
+
+# --- audio ----------------------------------------------------------------
+librosa>=0.10
+soundfile>=0.12
+
+# --- baselines ------------------------------------------------------------
+# E0b reference detector. Standalone package rather than the livekit plugin so
+# the baseline has no agent-framework dependency.
+silero-vad>=5.1
+
+# --- inference optimisation (§11) -----------------------------------------
+onnx>=1.17
+onnxruntime>=1.19
+# torch >= 2.9's ONNX exporter dispatches through onnxscript; without it
+# torch.onnx.export raises ModuleNotFoundError rather than falling back.
+onnxscript>=0.2
+
+# --- demo (§8) ------------------------------------------------------------
+gradio>=4.44
+
+# --- Hinglish clip synthesis (§3) ----------------------------------------
+# Bulbul v3 batch TTS. Requires SARVAM_API_KEY in .env.
+sarvamai>=0.1.0
+python-dotenv>=1.0
+
+# --- config / plumbing ----------------------------------------------------
+PyYAML>=6.0
+tqdm>=4.66
+matplotlib>=3.9
+
+# --- notebooks ------------------------------------------------------------
+jupyter>=1.1
+ipykernel>=6.29
+
+# --- tests ----------------------------------------------------------------
+pytest>=8.3
