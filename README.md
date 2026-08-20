@@ -23,6 +23,54 @@ Gradio demo you can talk into.
 
 ---
 
+## Results so far
+
+**E1** — the reference architecture (frozen Whisper Tiny + linear head, mean
+pooling, 8 s window), trained on 40,000 clips and scored **once** on a
+10,791-clip held-out test set. Threshold selected on validation (0.909298) and
+applied unchanged.
+
+| metric | validation | held-out test |
+|---|---:|---:|
+| F1 | 0.1363 | 0.2585 |
+| precision | 0.8395 | 0.9696 |
+| recall | 0.0742 | 0.1491 |
+| false interruption | 0.0142 | 0.0046 |
+| missed endpoints | 0.9258 | 0.8509 |
+| ROC-AUC | TBD | 0.8900 |
+| PR-AUC | TBD | 0.8757 |
+
+**Read those two headline numbers together.** ROC-AUC 0.8900 says the model ranks
+turn-ended above turn-held 89% of the time — 25 points above the best baseline.
+F1 0.2585 says the *chosen operating point* is poor: precision 0.9696 at recall
+0.1491, so it almost never interrupts and misses 85% of endpoints. Those are
+consistent, because ROC-AUC is threshold-free and F1 is measured at one
+threshold.
+
+That threshold is the problem, and the cause is identified: no config sets
+`max_false_interruption`, so threshold selection falls through to minimising
+`4·FPR + FNR` — a cost function with a known degenerate corner. E1's validation
+recall of 0.0742 sits just above the `MIN_USEFUL_RECALL = 0.05` guard, which is
+the signature of that guard binding. Re-selecting under the 10%
+false-interruption budget the project otherwise claims to enforce is the first
+item on the roadmap; it retrains nothing.
+[§9.6 of the report](report/technical_report.md) works through it.
+
+**E1 is a baseline, not the final system.** It has not been streamed, not scored
+on the Hinglish set, and its per-slice breakdown is not yet transcribed.
+
+**E2** — a window sweep at 0.5 / 1.0 / 1.5 / 2.0 / 4.0 s, with E1 supplying the
+8 s point — is **running**. All five configs differ from E1 in `window_seconds`
+only (verified by diffing `TrainConfig` field by field) and carry
+`test_cache_dir: null`, so the winner is chosen on validation and the held-out
+set is scored once, afterwards, on the winner alone.
+
+Full table, including what is still `TBD`:
+**[report/final_experiment_table.md](report/final_experiment_table.md)**.
+Submission status: **[SUBMISSION_CHECKLIST.md](SUBMISSION_CHECKLIST.md)**.
+
+---
+
 ## Why this is not just a silence timer
 
 The naive rule — wait for N ms of silence — cannot work, because pause duration
@@ -37,7 +85,12 @@ Measured here, on 400 clips of the published test set:
 | E0b — Silero VAD trailing-silence timer | 0.2468 | 0.0977 | 0.6433 |
 | **E0 run as a real streaming detector** | **0.0000** | 0.1951 | — |
 
-All three held to a shared 10% false-interruption ceiling. The energy gate
+All three held to a shared 10% false-interruption ceiling. Two caveats that
+matter for comparing these to E1 above: the threshold is swept **on the same 400
+clips it reports** (in-sample, so these are optimistic bounds), and 400 clips is
+not the 10,791-clip cache E1 was scored on. Re-running the baselines on the full
+cache is an open item. The comparable figure meanwhile is ROC-AUC: 0.6602 against
+E1's 0.8900. The energy gate
 *beating* Silero is the informative part: knowing where speech **is** does not
 tell you whether a thought is **finished**. And streamed, the silence timer
 collapses entirely — every apparent hit was a fire seconds before the utterance
@@ -48,7 +101,8 @@ Full reasoning and every number: **[report/technical_report.md](report/technical
 ### The finding worth reading first
 
 A clip-level score **does not predict streaming behaviour**. Same model, same
-threshold, measured two ways:
+threshold, measured two ways (on the small `SMOKE` verification run — E1 has not
+been streamed yet):
 
 | evaluation | F1 | false interruption |
 |---|---|---|
@@ -69,7 +123,7 @@ in training (randomly-offset crops), not in tuning.
 This is why `src/streaming.py` is an evaluated component rather than a wrapper
 assumed to inherit the model's accuracy. A submission that only classified clips
 would ship a detector interrupting 46% of held turns while reporting 3%.
-Details in [§6.1](report/technical_report.md).
+Details in [§11.2 of the report](report/technical_report.md).
 
 ---
 
@@ -121,7 +175,7 @@ Scaling up to the real corpus is one flag — see [Data](#data).
 | [src/optimize.py](src/optimize.py) | quantisation, ONNX export, CPU benchmarking |
 | [training/train.py](training/train.py) | one config in, one table row out. Checkpoints every epoch, resumes automatically |
 | [configs/](configs/) | 12 experiment configs, one variable changed each |
-| [scripts/](scripts/) | the twelve commands in [§14 of the report](report/technical_report.md) |
+| [scripts/](scripts/) | the commands in [Appendix B of the report](report/technical_report.md) |
 | [data/hinglish/](data/hinglish/) | 44 hand-labelled Hinglish phrases + the Bulbul renderer |
 | [demo/app.py](demo/app.py) | Gradio demo with a live probability timeline (CLI) |
 | [app.py](app.py) | Hugging Face Space entry point — thin adapter over `demo/app.py` |
@@ -187,21 +241,33 @@ train/test split is used as given; validation is carved out of train, grouped.
 Two leakage assertions run on every training run and abort it on failure.
 
 **What about leakage?** Asserted in code (`src/splits.py:assert_no_leakage`),
-twice: group overlap and clip-ID overlap. Ten tests cover it, including one that
+twice: group overlap and clip-ID overlap. Nine tests cover it, including one that
 deliberately leaks and asserts the exception fires.
 
 **What metrics, and why not accuracy?** **False-interruption rate**
 (FP/(FP+TN)) and **missed-endpoint rate** (FN/(FN+TP)), reported with F1,
 precision, recall, ROC-AUC, PR-AUC and the confusion matrix. Accuracy hides the
 asymmetry: interrupting a user is far worse than making them wait. One false
-interruption is weighted as four missed endpoints, and every row is held to a
-shared 10% interruption ceiling so the rows are comparable.
+interruption is weighted as four missed endpoints. A shared 10%
+false-interruption ceiling (`DEFAULT_FI_BUDGET`) exists so rows are comparable —
+but see the next answer: the **baselines** are selected under it and the
+**trained models are not**, which is a defect currently being fixed rather than a
+property to advertise.
 
 **How is the operating threshold chosen?** On **validation**, then applied
-unchanged to test. Re-picking on test would report the best case for a threshold
-nobody could have known in advance. Note the cost function's degenerate corner:
-for any weak detector, `4·FPR + FNR` is minimised by *never firing*. That is
-excluded from selection and reported explicitly as a finding.
+unchanged to test — for every run, without exception. Re-picking on test would
+report the best case for a threshold nobody could have known in advance.
+
+*Which* rule picks it is a live issue worth stating rather than hiding.
+`pick_threshold` supports two: minimise `4·FPR + FNR`, or maximise recall subject
+to a false-interruption ceiling. It defaults to the former, and no config in
+`configs/` overrides it — so the baselines (whose helper defaults to the ceiling)
+and the trained models are selected by different rules. The cost function has a
+degenerate corner: `4·FPR + FNR` is minimised by *never firing*. A
+`MIN_USEFUL_RECALL = 0.05` guard excludes the pure corner, and E1's validation
+recall of 0.0742 sitting just above it shows the guard, not an optimum, is what
+set the operating point. Fixing this is the first roadmap item; it retrains
+nothing. [§9.6](report/technical_report.md).
 
 **Does it stream?** Yes — that is the point.
 `src/streaming.py:StreamingTurnDetector` takes arbitrary audio chunks, runs the
@@ -222,14 +288,17 @@ complete utterances with real silence spliced mid-utterance. Reported as its own
 table, never averaged in.
 
 **What are the limitations?** Listed plainly in
-[§13 of the report](report/technical_report.md). The two that matter most:
-**clip-level scores do not transfer to streaming** (§6.1, and parameter tuning
-does not close it), and the verification model scored **F1 0.349 on TTS audio
-against 0.054 on human audio** — a 6.5× gap indicating it substantially learned
-TTS artefacts, which is why `--human-only` exists and why the `synthetic=False`
-slice is the honest headline. Also: no speaker-aware split is possible, the
-Hinglish set is TTS, noise/reverb augmentation is synthetic, and the currently
-measured numbers are on subsets sized to prove the pipeline.
+[§17 of the report](report/technical_report.md). The two that matter most:
+**clip-level scores do not transfer to streaming** (§11.2, and parameter tuning
+was measured and does not close it), and the verification model scored **F1 0.349
+on TTS audio against 0.054 on human audio** — a 6.5× gap suggesting it
+substantially learned TTS artefacts, which is why `--human-only` exists and why
+the `synthetic=False` slice is the honest headline. Also: no speaker-aware split
+is possible, the Hinglish set is TTS, noise/reverb augmentation is synthetic, and
+the threshold-selection defect above. E1 is full-scale (40,000 train / 10,791
+test), but most of the downstream analysis — streaming, error analysis, Hinglish,
+optimisation — has so far only been run against the much smaller `SMOKE`
+verification model and is labelled as such.
 
 ---
 

@@ -292,7 +292,11 @@ def build_ui():
         "real detector.\n"
     )
 
-    with gr.Blocks(title="Smart Turn Detection", theme=gr.themes.Soft()) as ui:
+    # `theme` moved from the Blocks constructor to launch() in Gradio 6.0.
+    # Passing it here still parses but is ignored with a UserWarning, so the
+    # UI would render unthemed while looking configured. It is passed at
+    # launch instead - in main() below and in the root app.py Space entry.
+    with gr.Blocks(title="Smart Turn Detection") as ui:
         gr.Markdown(
             f"""# Smart turn detection — audio-only endpointing
 
@@ -390,10 +394,13 @@ def main(argv=None) -> int:
     # appears when the server actually starts, so it survives any test that just
     # builds the Blocks object. Anything added here must be verified against the
     # pinned Gradio version in requirements.lock.txt.
+    import gradio as gr
+
     build_ui().launch(
         server_name=args.host,
         server_port=args.port,
         share=args.share,
+        theme=gr.themes.Soft(),
     )
     return 0
 

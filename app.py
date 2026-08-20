@@ -59,7 +59,11 @@ if __name__ == "__main__":
     # 0.0.0.0 and 7860 are what the Spaces runtime proxies. Both are overridable
     # by the GRADIO_SERVER_* env vars the Dockerfile sets, so this default only
     # applies when nothing else has an opinion.
+    import gradio as gr
+
     demo.launch(
         server_name=os.environ.get("GRADIO_SERVER_NAME", "0.0.0.0"),
         server_port=int(os.environ.get("GRADIO_SERVER_PORT", "7860")),
+        # Gradio 6 takes the theme at launch, not in the Blocks constructor.
+        theme=gr.themes.Soft(),
     )
