@@ -585,6 +585,22 @@ def main(argv=None) -> int:
         print(f"    train positive rate {raw:.4f} -> {eff:.4f} "
               f"(relabelled by the crop)")
 
+        # A wide shift range at a high probability can relabel away almost every
+        # positive: at prob=1.0 the only surviving positives are the few whose
+        # sampled shift landed inside the tolerance. The run would still train,
+        # on an essentially single-class set, and would report a confident model
+        # that has learned to always say "not finished". Loud rather than fatal,
+        # because a low rate can be a deliberate choice -- but it should never be
+        # an accident nobody noticed.
+        if eff < 0.05:
+            print(f"    WARNING: only {eff:.2%} of training windows are positive "
+                  f"after relabelling.")
+            print(f"    With prob={offset.prob} and max_shift="
+                  f"{offset.max_shift_ms:.0f}ms, nearly every positive clip is "
+                  f"being cropped away from")
+            print("    its boundary. Lower prob, or raise tolerance_ms, unless "
+                  "this is intended.")
+
     train_loader = make_loader(
         train_ds, cfg.batch_size, shuffle=not cfg.balanced_sampler,
         balanced=cfg.balanced_sampler, num_workers=cfg.num_workers, seed=cfg.seed,
